@@ -23,13 +23,13 @@ class SMD(TimeSeriesDataset):
     name: str = 'SMD'
     num_features: int = 38
     freq: str = 'h'  # in minuts
-    length: int = 52696
+    length: int = 52697
 
     def download(self):
         pass
 
     def _load(self) -> np.ndarray:
-        self.file_name = os.path.join(self.dir, 'SMD2.csv')
+        self.file_name = os.path.join(self.dir, 'SMD.csv')
         self.df = pd.read_csv(self.file_name, parse_dates=['date'])
         self.dates = pd.DataFrame({'date': self.df.date})
         self.data = self.df.drop("date", axis=1).values

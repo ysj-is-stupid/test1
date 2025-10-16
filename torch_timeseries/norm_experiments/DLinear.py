@@ -47,16 +47,17 @@ class DLinearExperiment(NormExperiment):
 
 def main():
     exp = DLinearExperiment(
-        dataset_type="DummyContinuous",
+        dataset_type="SMD",
         data_path="./data",
-        norm_type='No', # No RevIN DishTS SAN 
+        norm_type='FAN', # No RevIN DishTS SAN
         optm_type="Adam",
         batch_size=128,
-        device="cuda:1",
+        device="cuda:0",
         windows=96,
         pred_len=96,
         horizon=1,
         epochs=100,
+        norm_config={"freq_topk": 3}
     )
 
     exp.run()
@@ -67,4 +68,4 @@ def cli():
     
 
 if __name__ == "__main__":
-    cli()
+    main()

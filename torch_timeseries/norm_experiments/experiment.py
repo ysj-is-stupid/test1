@@ -9,6 +9,7 @@ import time
 import hashlib
 from prettytable import PrettyTable
 import sys
+import matplotlib.pyplot as plt
 ####
 from typing import Dict, List, Type, Union
 import numpy as np
@@ -34,6 +35,30 @@ from torch_timeseries.norm_experiments.Model import Model
 from torch_timeseries.utils.early_stopping import EarlyStopping
 import json
 import codecs
+def main_freq_part(x, k, rfft=True):
+    # freq normalization
+    # start = time.time()
+    if rfft:
+        xf = torch.fft.rfft(x, dim=1)
+    else:
+        xf = torch.fft.fft(x, dim=1)
+
+    k_values = torch.topk(xf.abs(), k, dim = 1)
+    indices = k_values.indices
+
+    mask = torch.zeros_like(xf)
+    mask.scatter_(1, indices, 1)
+    xf_filtered = xf * mask
+
+    if rfft:
+        x_filtered = torch.fft.irfft(xf_filtered, dim=1).real.float()
+    else:
+        x_filtered = torch.fft.ifft(xf_filtered, dim=1).real.float()
+
+    # Xres = Xt −Xnon
+    norm_input = x - x_filtered
+    # print(f"decompose take:{ time.time() - start} s")
+    return norm_input, x_filtered
 
 # class Task(Enum):
 #     SingleStepForecast : str = "single_step_forecast"
@@ -553,9 +578,8 @@ class NormExperiment(Settings):
 
     def _evaluate(self, dataloader):
         self.model.eval()
-        # self.n_model.eval()
         self.metrics.reset()
-        
+
         length = 0
         if dataloader is self.train_loader:
             length = self.dataloader.train_size
@@ -564,11 +588,16 @@ class NormExperiment(Settings):
         elif dataloader is self.test_loader:
             length = self.dataloader.test_size
 
-        # y_truths = []
-        # y_preds = []
+        # ---- START: 为固定可视化做准备 ----
+        # 创建用于存储特定batch数据的变量
+        preds_to_plot = None
+        truths_to_plot = None
+        # ---- END: 为固定可视化做准备 ----
+
         with torch.no_grad():
-            with tqdm(total=length,position=0, leave=True) as progress_bar:
-                for batch_x, batch_y,batch_origin_y, batch_x_date_enc, batch_y_date_enc in dataloader:
+            with tqdm(total=length, position=0, leave=True) as progress_bar:
+                # 使用 enumerate 获取 batch 的索引
+                for i, (batch_x, batch_y, batch_origin_y, batch_x_date_enc, batch_y_date_enc) in enumerate(dataloader):
                     batch_size = batch_x.size(0)
                     batch_x = batch_x.to(self.device, dtype=torch.float32)
                     batch_y = batch_y.to(self.device, dtype=torch.float32)
@@ -577,32 +606,89 @@ class NormExperiment(Settings):
 
                     preds, truths = self._process_batch(
                         batch_x, batch_y, batch_x_date_enc, batch_y_date_enc
-                    ) # preds : (B, O, N) truths: (B O N)
-                    # the result should be the same
-                    # self.metrics.update(preds.view(batch_size, -1), truths.view(batch_size, -1))
-                    # import pdb;pdb.set_trace()
+                    )
+
                     batch_origin_y = batch_origin_y.to(self.device)
                     if self.invtrans_loss:
                         preds = self.scaler.inverse_transform(preds)
                         truths = batch_origin_y
+
+                    # ---- START: 捕获要可视化的batch ----
+                    # 如果是测试集并且是第一个batch (i == 0)，则保存其结果
+                    if dataloader is self.test_loader and i == 0:
+                        preds_to_plot = preds.detach().cpu()
+                        truths_to_plot = truths.detach().cpu()
+                    # ---- END: 捕获要可视化的batch ----
 
                     if self.pred_len == 1:
                         self.metrics.update(preds.view(batch_size, -1), truths.view(batch_size, -1))
                     else:
                         self.metrics.update(preds.contiguous(), truths.contiguous())
 
-                    progress_bar.update(batch_x.shape[0])
-                    
-                    
-                    # y_preds.append(preds)
-                    # y_truths.append(truths)
-                    
-            # y_preds = torch.concat(y_preds, dim=0)
-            # y_truths = torch.concat(y_truths, dim=0)
+                    progress_bar.update(batch_x.size(0))
 
-            result = {
-                name: float(metric.compute()) for name, metric in self.metrics.items()
-            }
+        # ---- START: 固定通道和样本的可视化代码 ----
+
+        # 检查是否已捕获到用于绘图的数据
+        if preds_to_plot is not None and truths_to_plot is not None:
+            # 确保保存图片的目录存在
+            if not os.path.exists(self.run_save_dir):
+                os.makedirs(self.run_save_dir)
+
+            # --- 固定设置 ---
+            sample_idx = 0  # 固定使用第一个样本
+            channels_to_plot = [1, 2, 3]  # 固定绘制第 0, 2, 4 通道
+            k = 2  # 保留的主频分量个数
+            # --- 固定设置 ---
+
+            # 提取主频部分（确保传入的是PyTorch张量）
+            _, preds_main_freq = main_freq_part(preds_to_plot, k)
+            _, truths_main_freq = main_freq_part(truths_to_plot, k)
+
+            # 转换为numpy数组用于绘图
+            preds_main_freq = preds_main_freq.numpy()
+            truths_main_freq = truths_main_freq.numpy()
+
+            # 检查所选通道是否超出范围，并进行调整
+            num_features = truths_main_freq.shape[-1]
+            valid_channels = [c for c in channels_to_plot if c < num_features]
+            num_plots = len(valid_channels)
+
+            if num_plots > 0:
+                # 创建一个新的图形，包含 num_plots 个子图
+                fig, axs = plt.subplots(num_plots, 1, figsize=(20, 6 * num_plots), squeeze=False)
+
+                # 循环遍历每个要绘制的固定通道
+                for plot_idx, feature_idx in enumerate(valid_channels):
+                    # 在对应的子图上绘制真实值和预测值的主频部分
+                    axs[plot_idx, 0].plot(truths_main_freq[sample_idx, :, feature_idx], label='GroundTruth (Main Freq)')
+                    axs[plot_idx, 0].plot(preds_main_freq[sample_idx, :, feature_idx], label='Prediction (Main Freq)')
+
+                    axs[plot_idx, 0].set_title(
+                        f'Sample {sample_idx}, Channel {feature_idx}: Main Frequency Components')
+                    axs[plot_idx, 0].set_xlabel('Time Step')
+                    axs[plot_idx, 0].set_ylabel('Value')
+                    axs[plot_idx, 0].legend()
+                    axs[plot_idx, 0].grid(True)
+
+                # 调整子图间的间距
+                fig.tight_layout()
+
+                # 定义图片的保存路径和文件名
+                plot_path = os.path.join(self.run_save_dir, 'fixed_sample_main_frequency.png')
+
+                # 保存图像到本地文件
+                fig.savefig(plot_path)
+                self._run_print(f"Fixed sample main frequency plot saved to {plot_path}")
+
+                # 关闭图像，防止在内存中残留
+                plt.close(fig)
+
+        # ---- END: 固定通道和样本的可视化代码 ----
+
+        result = {
+            name: float(metric.compute()) for name, metric in self.metrics.items()
+        }
         return result
 
     

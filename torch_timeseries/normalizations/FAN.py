@@ -38,7 +38,7 @@ class FAN(nn.Module):
     Args:
         nn (_type_): _description_
     """
-    def __init__(self,  seq_len, pred_len, enc_in, freq_topk = 20, rfft=True, **kwargs):
+    def __init__(self,  seq_len, pred_len, enc_in, freq_topk = 3, rfft=True, **kwargs):
         super().__init__()
         self.seq_len = seq_len
         self.pred_len = pred_len
@@ -52,6 +52,7 @@ class FAN(nn.Module):
         self.weight = nn.Parameter(torch.ones(2, self.enc_in))
 
     def _build_model(self):
+        # self.model_freq = MLPfreq(seq_len=self.seq_len, pred_len=self.pred_len, enc_in=self.enc_in)
         self.model_freq = MLPfreq(seq_len=self.seq_len, pred_len=self.pred_len, enc_in=self.enc_in)
 
     def loss(self, true):
@@ -123,4 +124,102 @@ class MLPfreq(nn.Module):
         return self.model_all(inp)
 
 
+# ==================== START: 替换为下面的 V2 版本 ====================
 
+class KalmanPredictorV2(nn.Module):
+    """
+    改进版的卡尔曼思想预测器
+    - 增加模型容量 (state_dim, num_layers)
+    - 改进状态初始化方式 (RNN Encoder)
+    - 增加激活函数
+    """
+
+    def __init__(self, seq_len, pred_len, enc_in):
+        super(KalmanPredictorV2, self).__init__()
+        self.seq_len = seq_len
+        self.pred_len = pred_len
+        self.enc_in = enc_in
+
+        # 1. 提升模型容量
+        self.state_dim = 32  # 将状态维度从4增加到32
+        self.rnn_layers = 2  # 使用2层RNN增加深度
+
+        # 编码器：使用RNN来处理整个输入序列，获取更丰富的历史状态
+        self.state_encoder_rnn = nn.RNN(
+            input_size=self.enc_in,
+            hidden_size=self.state_dim,
+            num_layers=self.rnn_layers,
+            batch_first=True,
+            dropout=0.1
+        )
+
+        # 状态转移模型：同样使用RNN来预测未来状态的演化
+        self.transition_model = nn.RNN(
+            input_size=self.state_dim,
+            hidden_size=self.state_dim,
+            num_layers=self.rnn_layers,
+            batch_first=True,
+            dropout=0.1
+        )
+
+        # 观测模型：从潜在状态映射到观测值，增加非线性激活
+        self.observation_model = nn.Sequential(
+            nn.Linear(self.state_dim, self.state_dim * 2),
+            nn.GELU(),
+            nn.Linear(self.state_dim * 2, self.enc_in)
+        )
+
+    def forward(self, x_filtered):
+        # x_filtered shape: (Batch, seq_len, enc_in)
+
+        # 1. 改进的状态初始化：RNN完整编码输入序列
+        # state_encoder_rnn 的输出是 (outputs, h_n)
+        # 我们需要最后的隐藏状态 h_n
+        _, h_n = self.state_encoder_rnn(x_filtered)
+        # h_n 的形状是 (num_layers, B, state_dim)
+
+        # 2. 迭代预测未来状态
+        # 准备一个全零的输入序列，让 transition_model 自主演化
+        future_inputs = torch.zeros(x_filtered.size(0), self.pred_len, self.state_dim).to(x_filtered.device)
+
+        # 使用编码器得到的最终隐藏状态 h_n作为解码器（转移模型）的初始隐藏状态
+        all_future_states, _ = self.transition_model(future_inputs, h_n)
+        # all_future_states shape: (B, pred_len, state_dim)
+
+        # 3. 将未来状态映射回观测空间
+        future_predictions = self.observation_model(all_future_states)  # (B, pred_len, enc_in)
+
+        return future_predictions.permute(0, 2, 1)  # (B, enc_in, pred_len)
+
+
+class HybridPredictorV2(nn.Module):
+    """
+    带稳定化残差连接的混合预测器
+    """
+
+    def __init__(self, seq_len, pred_len, enc_in):
+        super(HybridPredictorV2, self).__init__()
+        self.mlp_freq = MLPfreq(seq_len, pred_len, enc_in)
+        self.kalman_predictor = KalmanPredictorV2(seq_len, pred_len, enc_in)
+
+        # 3. 稳定残差学习：引入可学习的缩放因子 alpha
+        # 初始化为0，使得训练初期Kalman分支的输出为0，不干扰主模型
+        self.alpha = nn.Parameter(torch.zeros(1))
+
+    def forward(self, main_freq, x):
+        # main_freq 是 x_filtered, x 是原始 input
+        # main_freq 和 x 的形状都是 (B, enc_in, seq_len)
+
+        # 1. 计算基线预测
+        base_prediction = self.mlp_freq(main_freq, x)
+
+        # 2. 计算残差预测
+        # KalmanPredictor 的输入需要是 (B, seq_len, enc_in)
+        residual_prediction = self.kalman_predictor(main_freq.transpose(1, 2))
+
+        # 3. 通过 alpha 进行缩放后相加
+        final_prediction = base_prediction + self.alpha * residual_prediction
+
+        return final_prediction
+
+# ==================== END: 替换 V2 版本 ====================
