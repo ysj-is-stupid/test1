@@ -87,12 +87,12 @@ def cli():
 
 def main():
     exp = InformerExperiment(
-        dataset_type="ExchangeRate",
+        dataset_type="SMD",
         data_path="./data",
-        norm_type='RevIN', # No  DishTS
+        norm_type='FAN', # No  DishTS
         optm_type="Adam",
         batch_size=128,
-        device="cuda:1",
+        device="cuda:0",
         windows=96,
         pred_len=96,
         horizon=1,
@@ -101,9 +101,10 @@ def main():
         dropout=0.05,
         d_ff=256,
         # scaler_type="MaxAbsScaler",
+        norm_config={"freq_topk": 3}
     )
 
     exp.run()
 
 if __name__ == "__main__":
-    cli()
+    main()

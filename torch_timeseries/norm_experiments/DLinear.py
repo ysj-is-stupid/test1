@@ -57,7 +57,7 @@ def main():
         pred_len=96,
         horizon=1,
         epochs=100,
-        norm_config={"freq_topk": 3}
+        norm_config={"freq_topk": 5}
     )
 
     exp.run()

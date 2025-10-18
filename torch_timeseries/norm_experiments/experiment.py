@@ -627,7 +627,7 @@ class NormExperiment(Settings):
 
                     progress_bar.update(batch_x.size(0))
 
-        # ---- START: 固定通道和样本的可视化代码 ----
+        # ---- START: 多样本、多通道的增强可视化代码 ----
 
         # 检查是否已捕获到用于绘图的数据
         if preds_to_plot is not None and truths_to_plot is not None:
@@ -635,56 +635,71 @@ class NormExperiment(Settings):
             if not os.path.exists(self.run_save_dir):
                 os.makedirs(self.run_save_dir)
 
-            # --- 固定设置 ---
-            sample_idx = 0  # 固定使用第一个样本
-            channels_to_plot = [1, 2, 3]  # 固定绘制第 0, 2, 4 通道
-            k = 2  # 保留的主频分量个数
-            # --- 固定设置 ---
+            # --- 可视化设置 ---
+            samples_to_plot = [0,96]  # 选择批次中的前4个样本
+            channels_to_plot = [0, 1, 2,3,4,5]  # 选择前3个通道
+            k = self.norm_config.get('freq_topk', 2)  # 从配置中动态获取k值
+            # --- 可视化设置 ---
 
-            # 提取主频部分（确保传入的是PyTorch张量）
-            _, preds_main_freq = main_freq_part(preds_to_plot, k)
-            _, truths_main_freq = main_freq_part(truths_to_plot, k)
+            # 提取主频和残差部分
+            preds_to_plot_tensor = torch.from_numpy(preds_to_plot.numpy())
+            truths_to_plot_tensor = torch.from_numpy(truths_to_plot.numpy())
 
-            # 转换为numpy数组用于绘图
+            preds_residual, preds_main_freq = main_freq_part(preds_to_plot_tensor, k)
+            truths_residual, truths_main_freq = main_freq_part(truths_to_plot_tensor, k)
+
+            # 转换为numpy用于绘图
             preds_main_freq = preds_main_freq.numpy()
             truths_main_freq = truths_main_freq.numpy()
+            preds_residual = preds_residual.numpy()
+            truths_residual = truths_residual.numpy()
 
-            # 检查所选通道是否超出范围，并进行调整
-            num_features = truths_main_freq.shape[-1]
-            valid_channels = [c for c in channels_to_plot if c < num_features]
-            num_plots = len(valid_channels)
+            num_samples = len(samples_to_plot)
+            num_channels = len(channels_to_plot)
 
-            if num_plots > 0:
-                # 创建一个新的图形，包含 num_plots 个子图
-                fig, axs = plt.subplots(num_plots, 1, figsize=(20, 6 * num_plots), squeeze=False)
+            # 为每个样本创建一个单独的图片文件
+            for sample_idx in samples_to_plot:
+                if sample_idx >= preds_to_plot.shape[0]:
+                    continue
 
-                # 循环遍历每个要绘制的固定通道
-                for plot_idx, feature_idx in enumerate(valid_channels):
-                    # 在对应的子图上绘制真实值和预测值的主频部分
-                    axs[plot_idx, 0].plot(truths_main_freq[sample_idx, :, feature_idx], label='GroundTruth (Main Freq)')
-                    axs[plot_idx, 0].plot(preds_main_freq[sample_idx, :, feature_idx], label='Prediction (Main Freq)')
+                # 每个样本有3行图：原始对比、主频对比、残差对比
+                fig, axs = plt.subplots(3, num_channels, figsize=(7 * num_channels, 15), squeeze=False)
+                fig.suptitle(f'Comprehensive Analysis for Sample {sample_idx}', fontsize=16)
 
-                    axs[plot_idx, 0].set_title(
-                        f'Sample {sample_idx}, Channel {feature_idx}: Main Frequency Components')
-                    axs[plot_idx, 0].set_xlabel('Time Step')
-                    axs[plot_idx, 0].set_ylabel('Value')
-                    axs[plot_idx, 0].legend()
-                    axs[plot_idx, 0].grid(True)
+                for plot_col, feature_idx in enumerate(channels_to_plot):
+                    if feature_idx >= preds_to_plot.shape[-1]:
+                        continue
 
-                # 调整子图间的间距
-                fig.tight_layout()
+                    # 1. 原始信号对比
+                    axs[0, plot_col].plot(truths_to_plot[sample_idx, :, feature_idx], label='GroundTruth (Original)')
+                    axs[0, plot_col].plot(preds_to_plot[sample_idx, :, feature_idx], label='Prediction (Original)')
+                    axs[0, plot_col].set_title(f'Channel {feature_idx}: Original Signal')
+                    axs[0, plot_col].legend()
+                    axs[0, plot_col].grid(True)
 
-                # 定义图片的保存路径和文件名
-                plot_path = os.path.join(self.run_save_dir, 'fixed_sample_main_frequency.png')
+                    # 2. 主频成分对比
+                    axs[1, plot_col].plot(truths_main_freq[sample_idx, :, feature_idx], label='GroundTruth (Main Freq)')
+                    axs[1, plot_col].plot(preds_main_freq[sample_idx, :, feature_idx], label='Prediction (Main Freq)')
+                    axs[1, plot_col].set_title(f'Channel {feature_idx}: Main Frequency')
+                    axs[1, plot_col].legend()
+                    axs[1, plot_col].grid(True)
 
-                # 保存图像到本地文件
+                    # 3. 残差成分对比
+                    axs[2, plot_col].plot(truths_residual[sample_idx, :, feature_idx], label='GroundTruth (Residual)')
+                    axs[2, plot_col].plot(preds_residual[sample_idx, :, feature_idx], label='Prediction (Residual)')
+                    axs[2, plot_col].set_title(f'Channel {feature_idx}: Residual')
+                    axs[2, plot_col].legend()
+                    axs[2, plot_col].grid(True)
+
+                fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+                # 为每个样本保存一个图片
+                plot_path = os.path.join(self.run_save_dir, f'comprehensive_analysis_sample_{sample_idx}.png')
                 fig.savefig(plot_path)
-                self._run_print(f"Fixed sample main frequency plot saved to {plot_path}")
-
-                # 关闭图像，防止在内存中残留
+                self._run_print(f"Comprehensive plot for sample {sample_idx} saved to {plot_path}")
                 plt.close(fig)
 
-        # ---- END: 固定通道和样本的可视化代码 ----
+        # ---- END: 增强可视化代码 ----
 
         result = {
             name: float(metric.compute()) for name, metric in self.metrics.items()
